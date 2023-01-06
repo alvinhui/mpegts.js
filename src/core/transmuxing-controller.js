@@ -22,6 +22,7 @@ import Browser from '../utils/browser.js';
 import MediaInfo from './media-info.js';
 import FLVDemuxer from '../demux/flv-demuxer.js';
 import TSDemuxer from '../demux/ts-demuxer';
+import MP4Demuxer from '../demux/mp4-demuxer.js';
 import MP4Remuxer from '../remux/mp4-remuxer.js';
 import DemuxErrors from '../demux/demux-errors.js';
 import IOController from '../io/io-controller.js';
@@ -195,7 +196,7 @@ class TransmuxingController {
             // cross-segment seeking
             let targetSegmentInfo = this._mediaInfo.segments[targetSegmentIndex];
 
-            if (targetSegmentInfo == undefined) {
+            if (targetSegmentInfo == undefined || this._demuxer.TAG == 'MP4Demuxer') {
                 // target segment hasn't been loaded. We need metadata then seek to expected time
                 this._pendingSeekTime = milliseconds;
                 this._internalAbort();
@@ -260,6 +261,15 @@ class TransmuxingController {
                 if (probeData.match) {
                     // Hit as MPEG-TS
                     this._setupTSDemuxerRemuxer(probeData);
+                    consumed = this._demuxer.parseChunks(data, byteStart);
+                }
+            }
+
+            if (!probeData.match && !probeData.needMoreData) {
+                // Non-MPEG-TS, try MP4 probe
+                probeData = MP4Demuxer.probe(data);
+                if (probeData.match) {
+                    this._setupMP4DemuxerRemuxer(probeData);
                     consumed = this._demuxer.parseChunks(data, byteStart);
                 }
             }
@@ -330,6 +340,30 @@ class TransmuxingController {
 
         this._remuxer.bindDataSource(this._demuxer);
         this._demuxer.bindDataSource(this._ioctl);
+
+        this._remuxer.onInitSegment = this._onRemuxerInitSegmentArrival.bind(this);
+        this._remuxer.onMediaSegment = this._onRemuxerMediaSegmentArrival.bind(this);
+    }
+
+    _setupMP4DemuxerRemuxer(probeData) {
+        this._demuxer = new MP4Demuxer(probeData, this._config);
+
+        if (!this._remuxer) {
+            this._remuxer = new MP4Remuxer(this._config);
+        }
+        
+        let mds = this._mediaDataSource;
+        if (mds.duration != undefined && !isNaN(mds.duration)) {
+            this._demuxer.overridedDuration = mds.duration;
+        }
+        this._demuxer.timestampBase = mds.segments[this._currentSegmentIndex].timestampBase;
+
+        this._demuxer.onError = this._onDemuxException.bind(this);
+        this._demuxer.onMediaInfo = this._onMediaInfo.bind(this);
+
+        this._remuxer.bindDataSource(this._demuxer
+            .bindDataSource(this._ioctl
+            ));
 
         this._remuxer.onInitSegment = this._onRemuxerInitSegmentArrival.bind(this);
         this._remuxer.onMediaSegment = this._onRemuxerMediaSegmentArrival.bind(this);
